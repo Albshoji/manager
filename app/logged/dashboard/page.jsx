@@ -2,19 +2,17 @@
 
 import styles from './Dashboard.module.css';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faHouse, faUser, faRecycle, faHandshake } from '@fortawesome/free-solid-svg-icons';
-import { collection, query, onSnapshot } from "firebase/firestore";
-import { Firestore } from "../../../config/firebase";
-
+import { faHouse, faUser, faRecycle, faHandshake, faTrophy } from '@fortawesome/free-solid-svg-icons';
+import { collection, query, onSnapshot, getDocs } from "firebase/firestore";
+import { getDatabase, ref as dbRef, onValue } from "firebase/database"; 
+import { Firestore, firebaseApp } from "../../../config/firebase"; 
 import React, { useEffect, useState } from 'react';
 
 const firestoreRefCollector = collection(Firestore, 'collector');
 const firestoreRefDonor = collection(Firestore, 'donor');
 
-
 function CountCollectors(callback) {
     const q = query(firestoreRefCollector);
-
     return onSnapshot(q, (snapshot) => {
         const count = snapshot.size;
         callback(count);
@@ -26,7 +24,6 @@ function CountCollectors(callback) {
 
 function CountDonor(callback) {
     const q = query(firestoreRefDonor);
-
     return onSnapshot(q, (snapshot) => {
         const count = snapshot.size;
         callback(count);
@@ -42,16 +39,16 @@ function SumResidues(callback) {
 
         snapshot.forEach((doc) => {
             const statistic = doc.data().statistic;
-            sum_eletronicKg += statistic.eletronicKg;
-            sum_glassKg += statistic.glassKg;
-            sum_metalKg += statistic.metalKg;
-            sum_oilKg += statistic.oilKg;
-            sum_paperKg += statistic.paperKg;
-            sum_plasticKg += statistic.plasticKg;
-            sum_RecyclingCollections += statistic.collectionsCompleted;
+            sum_eletronicKg += statistic.eletronicKg || 0;
+            sum_glassKg += statistic.glassKg || 0;
+            sum_metalKg += statistic.metalKg || 0;
+            sum_oilKg += statistic.oilKg || 0;
+            sum_paperKg += statistic.paperKg || 0;
+            sum_plasticKg += statistic.plasticKg || 0;
+            sum_RecyclingCollections += statistic.collectionsCompleted || 0;
         });
 
-        const total_sum = sum_eletronicKg + sum_glassKg + sum_metalKg + sum_oilKg + sum_paperKg + sum_plasticKg + sum_RecyclingCollections;
+        const total_sum = sum_eletronicKg + sum_glassKg + sum_metalKg + sum_oilKg + sum_paperKg + sum_plasticKg;
 
         callback({
             sum_eletronicKg: sum_eletronicKg,
@@ -66,6 +63,30 @@ function SumResidues(callback) {
     });
 }
 
+
+const calculateTotalPoints = (collections) => {
+  let points = 0;
+  if (!collections) return 0;
+  collections.forEach(item => {
+    const typesArray = (typeof item.types === 'string' && item.types) ? item.types.split(',').map(type => type.trim()) : [];
+    const weightMatch = String(item.weight || '0').match(/\d+/);
+    const weight = parseInt(weightMatch?.[0] ?? '0', 10);
+    if (weight > 0 && typesArray.length > 0) {
+      typesArray.forEach(type => {
+        if (type === "plastico") points += weight * 80;
+        if (type === "metal") points += weight * 12;
+        if (type === "eletronico") points += weight * 15;
+        if (type === "papel") points += weight * 50;
+        if (type === "oil") points += weight * 10;
+        if (type === "vidro") points += weight * 30;
+      });
+    }
+  });
+  return points;
+};
+
+
+
 const Dashboard = () => {
     const [NCollector, setNCollector] = useState(0);
     const [NDonor, setNDonor] = useState(0);
@@ -78,13 +99,11 @@ const Dashboard = () => {
     const [QPp, setQPp] = useState(0);
     const [QPl, setQPl] = useState(0);
 
+    const [rankingData, setRankingData] = useState([]);
+
     useEffect(() => {
-        const unsubscribe1 = CountCollectors((data) => {
-            setNCollector(data);
-        });
-        const unsubscribe2 = CountDonor((data) => {
-            setNDonor(data);
-        });
+        const unsubscribe1 = CountCollectors((data) => setNCollector(data));
+        const unsubscribe2 = CountDonor((data) => setNDonor(data));
         const unsubscribe3 = SumResidues((data) => {
             setQSumResidues(data.total_sum);
             setNSumRecyclingCollections(data.sum_recyclingCollections);
@@ -93,7 +112,7 @@ const Dashboard = () => {
             setQMt(data.sum_metalKg);
             setQOl(data.sum_oilKg);
             setQPp(data.sum_paperKg);
-            setQPl(data.sum_paperKg);
+            setQPl(data.sum_plasticKg);
         });
 
         return () => {
@@ -103,14 +122,76 @@ const Dashboard = () => {
         };
     }, []);
 
+    useEffect(() => {
+        const fetchAndSetRanking = async () => {
+            const donorNames = {};
+            try {
+                const donorSnapshot = await getDocs(firestoreRefDonor);
+                donorSnapshot.forEach(doc => {
+                    donorNames[doc.id] = doc.data().name || 'Doador Anônimo';
+                });
+            } catch (error) {
+                console.error("Erro ao buscar nomes dos doadores:", error);
+            }
+
+            const infoRef = dbRef(getDatabase(firebaseApp), 'recyclable/');
+            
+            const unsubscribe = onValue(infoRef, (snapshot) => {
+                if (!snapshot.exists()) {
+                    setRankingData([]);
+                    return;
+                }
+                const data = snapshot.val();
+                
+                const allDonorsCollections = {};
+                for (const id in data) {
+                    const collectionInfo = data[id];
+                    const currentDonorId = collectionInfo?.donor?.id;
+                    if (currentDonorId) {
+                        if (!allDonorsCollections[currentDonorId]) {
+                            allDonorsCollections[currentDonorId] = [];
+                        }
+                        allDonorsCollections[currentDonorId].push({
+                            types: collectionInfo.types ?? '',
+                            weight: collectionInfo.weight ?? '0 KG',
+                        });
+                    }
+                }
+
+                const donorScores = Object.keys(allDonorsCollections).map(donorId => ({
+                    id: donorId,
+                    name: donorNames[donorId] || 'Doador Anônimo',
+                    score: calculateTotalPoints(allDonorsCollections[donorId])
+                }));
+
+                donorScores.sort((a, b) => b.score - a.score);
+                setRankingData(donorScores);
+            }, (error) => {
+                console.error('Erro ao buscar dados de reciclagem:', error);
+            });
+            
+            return unsubscribe;
+        };
+
+        let unsubscribeFromOnValue;
+        fetchAndSetRanking().then(unsubscribe => {
+            unsubscribeFromOnValue = unsubscribe;
+        });
+        
+        return () => {
+            if (unsubscribeFromOnValue) {
+                unsubscribeFromOnValue();
+            }
+        };
+    }, []);
 
     const stats = [
         { title: 'Coletores', value: NCollector, icon: faUser },
         { title: 'Doadores', value: NDonor, icon: faHouse },
-        { title: 'Resíduos coletados', value: QSumResidues, icon: faRecycle },
-        { title: 'Coletas feitas', value: NRecyclingCollections, icon: faHandshake },
+        { title: 'Kgs Coletados', value: QSumResidues, icon: faRecycle },
+        { title: 'Coletas Feitas', value: NRecyclingCollections, icon: faHandshake },
     ];
-
+    
     const wasteData = [
         { type: 'Eletrônico', amount: QEl, color: '#FFA500' },
         { type: 'Vidro', amount: QGl, color: '#6A5ACD' },
@@ -119,6 +200,8 @@ const Dashboard = () => {
         { type: 'Papel', amount: QPp, color: '#6A5ACD' },
         { type: 'Plástico', amount: QPl, color: '#FF6347' },
     ];
+    
+    const totalWasteForBar = QEl + QGl + QMt + QOl + QPp + QPl || 1;
 
     return (
         <div>
@@ -131,7 +214,7 @@ const Dashboard = () => {
                         </div>
                         <div className={styles.info}>
                             <h3>{item.title}</h3>
-                            {item.title == "Resíduos coletados" ? <p>{item.value} kg</p> : <p>{item.value}</p>}
+                            <p>{item.value}</p>
                         </div>
                     </div>
                 ))}
@@ -147,17 +230,30 @@ const Dashboard = () => {
                                 <div
                                     className={styles.wasteBar}
                                     style={{
-                                        width: `${waste.amount}%`,
+                                        width: `${(waste.amount / totalWasteForBar) * 100}%`,
                                         backgroundColor: 'rgb(170, 220, 160)',
                                     }}
                                 ></div>
                             </div>
-                            <span className={styles.wasteAmount}>{waste.amount} kg</span>
+                            <span className={styles.wasteAmount}>{waste.amount} kg</span> 
                         </div>
                     ))}
                 </div>
             </div>
 
+            {/* Seção de Ranking de Doadores agora usa os dados dinâmicos */}
+            <div className={styles.rankingSection}>
+                <h2><FontAwesomeIcon icon={faTrophy} /> Ranking de Doadores</h2>
+                <ul className={styles.rankingList}>
+                    {rankingData.map((donor, index) => (
+                        <li key={donor.id} className={styles.rankingItem}>
+                            <span className={styles.rank}>{index + 1}º</span>
+                            <span className={styles.donorName}>{donor.name}</span>
+                            <span className={styles.donorScore}>{donor.score.toLocaleString('pt-BR')} pts</span>
+                        </li>
+                    ))}
+                </ul>
+            </div>
         </div>
     );
 };
